@@ -20,9 +20,13 @@ from tensorflow.keras.optimizers import Nadam
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, TensorBoard
 from tensorflow.keras.utils import multi_gpu_model
 from tensorflow.python.client import device_lib
+from sklearn.utils import class_weight
+from tensorflow.keras.models import load_model
 
 from CNN_LSTM_load_data import  generator_train, generator_test
 from CNN_LSTM_split_data import generate_feature_train_list, generate_feature_test_list
+from CNN_LSTM_split_data import generate_feature_augment_list, remove_transition_samples
+
 
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
@@ -39,10 +43,12 @@ test_label_dir = base_label_dir + "test/"
 train_image_dir = base_image_dir + "train/"
 train_label_dir = base_label_dir + "train/"
 
-test_videos = ['video02',  'video12', 'video21', 'video24','video36', 'video41','video51']
-aug_videos = ['video01', 'video17', 'video25',  'video42', 'video43',  'video45', 'video48', 'video57', 'video67','video69',
-              'video71', 'video30',  'video32',  'video34',  'video37', 'video39', 'video60','video31']
-train_videos =  ['video04','video05', 'video08', 'video09', 'video10', 'video14']
+test_videos = ['video04',  'video12', 'video13', 'video17', 'video24', 'video36', 'video40']
+aug_videos = ['video01', 'video02', 'video16',  'video25', 'video30', 'video31',  'video34', 'video37', 'video39',
+               'video42', 'video43',  'video45', 'video48', 'video51', 'video52', 'video57',  'video60', 'video66',  
+	           'video67', 'video72']
+
+train_videos =  ['video05', 'video08', 'video09', 'video12','video14', 'video64'] 
 
 
 # 7 phases for surgical operation
@@ -53,12 +59,29 @@ class_labels = {"Preparation":0, "CalotTriangleDissection":1, "ClippingCutting":
 num_classes = 7
 
 # Dimensions of input feature 
-frames = 25    #Number of frames over which LSTM prediction happens
+frames = 15    #Number of frames over which LSTM prediction happens
 channels = 3  #RGB
 rows = 224    
 columns = 224 
 BATCH_SIZE = 8
 nb_epochs = 24
+
+
+# Compute class_weights for imbalanced train set
+def compute_class_weight(input_list):
+
+  label_list = []
+  for label in input_list:
+    label = label[1].split('\t')[1].strip()
+    label_list.append(label)
+  
+  class_weights = class_weight.compute_class_weight('balanced', 
+                                                   np.unique(label_list),  
+                                                   label_list)
+                                                   
+  return(class_weights)                                                 
+                                                   
+  
 
 # Define callback function if detailed log required
 class History(tensorflow.keras.callbacks.Callback):
@@ -72,7 +95,7 @@ class History(tensorflow.keras.callbacks.Callback):
         self.train_loss.append(logs.get('loss'))
         self.train_acc.append(logs.get('categorical_accuracy'))
         
-    def on_epoch_end(self, batch, logs={}):    
+    #def on_epoch_end(self, batch, logs={}):    
         self.val_acc.append(logs.get('val_categorical_accuracy'))
         self.val_loss.append(logs.get('val_loss'))
         
@@ -99,7 +122,17 @@ class CNN_LSTM_ModelCheckpoint(tensorflow.keras.callbacks.Callback):
 def get_available_gpus():
         local_device_protos = device_lib.list_local_devices()
         return [x.name for x in local_device_protos if x.device_type == 'GPU']
-        
+
+def get_VGG16_model():
+
+  #load pre-trained cnn model
+  cnn_model = load_model(model_save_dir+'vgg16_model.h5')
+
+  #freeze cnn weights for LSTM training
+  for layer in cnn_model.layers:
+    layer.trainable = False        
+    
+  return(cnn_model)  
         
 def get_VGG16_base():
 
@@ -161,12 +194,14 @@ def get_stacked_LSTM_model(input, base_model):
 # Function pointers for models
   
 cnn_func_ptr = {
+ 'VGG16_SPLIT_LSTM' : get_VGG16_model,
  'VGG16_NORM_LSTM' : get_VGG16_base,
  'VGG16_STACKED_LSTM' : get_VGG16_base
  
 }     
   
 lstm_func_ptr = {
+ 'VGG16_SPLIT_LSTM' : get_LSTM_model,
  'VGG16_NORM_LSTM' : get_LSTM_model,
  'VGG16_STACKED_LSTM' : get_stacked_LSTM_model
  
@@ -216,11 +251,20 @@ if __name__ == "__main__":
               metrics=["categorical_accuracy"]) 
 
   train_samples  = generate_feature_train_list(train_image_dir, train_label_dir, train_videos)
-  aug_samples  = generate_feature_train_list(train_image_dir, train_label_dir, aug_videos)
+  aug_samples  = generate_feature_augment_list(train_image_dir, train_label_dir, aug_videos)
   print(len(train_samples), len(aug_samples))
   train_samples.extend(aug_samples)
   print(len(train_samples))
+  
+  train_samples = remove_transition_samples(train_samples, frames)
+  print(len(train_samples))
+  class_weights = compute_class_weight(train_samples)
+  
+  class_weights = [2,1,2,1,2,3,5]
   validation_samples = generate_feature_test_list(test_image_dir, test_label_dir, test_videos)
+  
+  validation_samples = remove_transition_samples(validation_samples, frames)
+  
   train_len = int(len(train_samples)/(BATCH_SIZE*frames))
   train_len = (train_len)*BATCH_SIZE*frames
   train_samples = train_samples[0:train_len]
@@ -249,7 +293,7 @@ if __name__ == "__main__":
             steps_per_epoch=int(len(train_samples)/(BATCH_SIZE*frames)), 
             validation_data=validation_generator, 
             validation_steps=int(len(validation_samples)/(BATCH_SIZE*frames)), 
-            #callbacks = [history],
+            class_weight = class_weights,
             callbacks = callbacks,
             epochs=nb_epochs, verbose=1)
 
@@ -266,7 +310,7 @@ if __name__ == "__main__":
   history_dict['val_acc'] = history.val_acc
 
   #json.dump(history.history, open(history_dir+'model_history', 'w'))
-  with open(history_dir+'model_history', 'wb') as file_pi:
+  with open(history_dir+'cnn_lstm_history', 'wb') as file_pi:
         pickle.dump(history_dict, file_pi)
         
 #print(history.val_acc)
