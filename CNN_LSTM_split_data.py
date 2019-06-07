@@ -14,7 +14,7 @@ class_labels = {"Preparation":0, "CalotTriangleDissection":1, "ClippingCutting":
 
 
 
-def generate_feature_augment_list(image_dir, label_dir, video_files):
+def generate_feature_augment_list(image_dir, label_dir, video_files, exclude_list = ['CalotTriangleDissection', 'GallbladderDissection']):
 
   
   #label_files = glob.glob(label_dir+"video*.txt")
@@ -40,7 +40,7 @@ def generate_feature_augment_list(image_dir, label_dir, video_files):
       phase = label_split[1].strip()
      
       image_file = label_file+'-'+index+'.jpg'
-      if(phase != "CalotTriangleDissection") and (phase != "GallbladderDissection"):
+      if(phase not in exclude_list):
          aug_labels.append(label)
          local_image_files.append(label_file+'/'+image_file)
       
